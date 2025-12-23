@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Digital Replica Viewer v3</title>
+    <style>
+        /* --- LAYOUT --- */
+        body { font-family: 'Segoe UI', sans-serif; margin: 0; display: flex; flex-direction: column; height: 100vh; background: #222; overflow: hidden; color: #ddd; }
+        
+        #toolbar { background: #333; padding: 10px; display: flex; gap: 10px; border-bottom: 1px solid #444; align-items: center; z-index: 10; }
+        select { background: #444; color: white; padding: 5px; border: 1px solid #555; border-radius: 4px; }
+        button { background: #555; color: white; border: none; padding: 6px 12px; cursor: pointer; border-radius: 4px; transition: background 0.2s; }
+        button:hover { background: #666; }
+        button:active { background: #444; }
+        
+        #workspace { flex: 1; display: flex; overflow: hidden; position: relative; }
+        
+        /* --- LEFT PANE: THE SCAN --- */
+        #pane-scan { 
+            flex: 1; 
+            background: #1a1a1a; 
+            border-right: 2px solid #444; 
+            position: relative; 
+            overflow: hidden;   
+            cursor: grab;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        #pane-scan.grabbing { cursor: grabbing; }
+
+        #scan-container {
+            transform-origin: center center;
+            transition: transform 0.1s ease-out; 
+            will-change: transform;
+        }
+
+        #scan-img { 
+            max-width: 90%; 
+            box-shadow: 0 0 30px rgba(0,0,0,0.8); 
+            display: block;
+            pointer-events: none; 
+        }
+
+        /* --- NAVIGATION ZONES --- */
+        .nav-zone {
+            position: absolute;
+            top: 0; bottom: 0;
+            width: 10%; 
+            z-index: 100;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 40px;
+            color: rgba(255,255,255,0.1);
+            transition: 0.2s;
+            cursor: pointer;
+            user-select: none;
+        }
+        .nav-zone:hover { background: rgba(255,255,255,0.05); color: rgba(255,255,255,0.5); }
+        .nav-left { left: 0; }
+        .nav-right { right: 0; }
+
+        /* --- RIGHT PANE: THE REPLICA --- */
+        #pane-html { flex: 1; background: #fff; display: flex; flex-direction: column; }
+        iframe { flex: 1; border: none; width: 100%; height: 100%; }
+        
+        .header-label { background: #444; color: #aaa; padding: 5px 10px; font-size: 11px; font-weight: bold; text-transform: uppercase; letter-spacing: 1px; display: flex; justify-content: space-between; }
+        .status-pill { background: #d9534f; color: white; padding: 1px 6px; border-radius: 3px; font-size: 10px; display: none;}
+    </style>
+</head>
+<body>
+
+    <div id="toolbar">
+        <strong>Replica Viewer</strong>
+        <select id="sel-collection" onchange="loadBooks()"></select>
+        <select id="sel-book" onchange="loadPages()"></select>
+        <select id="sel-page" onchange="loadContent()"></select>
+        
+        <div style="width: 1px; height: 20px; background: #555; margin: 0 10px;"></div>
+        
+        <button onclick="rotate(-90)" title="Rotate Left">⟲</button>
+        <button onclick="rotate(90)" title="Rotate Right">⟳</button>
+        <button onclick="resetView()">Reset View</button>
+
+        <div style="flex:1"></div>
+        <span style="font-size: 12px; color: #888;">Images are read-only</span>
+    </div>
+
+    <div id="workspace">
+        <div id="pane-scan">
+            <div class="nav-zone nav-left" onclick="changePage(-1)">‹</div>
+            <div class="nav-zone nav-right" onclick="changePage(1)">›</div>
+
+            <div id="scan-container">
+                <img id="scan-img" src="">
+            </div>
+        </div>
+
+        <div id="pane-html">
+            <div class="header-label">
+                <span id="unsaved-badge" class="status-pill">ROTATION NOT SAVED</span>
+            </div>
+            <iframe id="replica-frame"></iframe>
+        </div>
+    </div>
+
+<script>
+        // --- DATA STATE ---
+        let indexData = {};
+        
+        // --- VIEW STATE ---
+        let scale = 1;
+        let rotation = 0;
+        let panning = false;
+        let pointX = 0, pointY = 0; 
+        let startX = 0, startY = 0;
+
+        // --- INITIALIZATION ---
+        // We fetch index.json from the processed_data folder
+        fetch('processed_data/index.json')
+            .then(r => {
+                if (!r.ok) throw new Error("Index file not found. Run process_project.py first.");
+                return r.json();
+            })
+            .then(data => {
+                indexData = data;
+                const s = document.getElementById('sel-collection');
+                
+                // Populate Collection Dropdown
+                const collections = Object.keys(data).sort();
+                if (collections.length === 0) {
+                    alert("No processed collections found in processed_data/");
+                    return;
+                }
+                collections.forEach(c => s.add(new Option(c, c)));
+                loadBooks();
+            })
+            .catch(err => {
+                console.error(err);
+                alert("Error loading index.json. Ensure 'processed_data/index.json' exists.");
+            });
+
+        // --- IMAGE MANIPULATION ---
+        const pane = document.getElementById('pane-scan');
+        const container = document.getElementById('scan-container');
+
+        pane.addEventListener('wheel', (e) => {
+            e.preventDefault();
+            const zoomSpeed = 0.1;
+            const direction = e.deltaY > 0 ? -1 : 1;
+            scale = Math.min(Math.max(0.1, scale + (direction * zoomSpeed)), 5);
+            updateTransform();
+        });
+
+        pane.addEventListener('mousedown', (e) => {
+            if (e.target.classList.contains('nav-zone')) return;
+            e.preventDefault();
+            startX = e.clientX - pointX;
+            startY = e.clientY - pointY;
+            panning = true;
+            pane.classList.add('grabbing');
+        });
+
+        window.addEventListener('mousemove', (e) => {
+            if (!panning) return;
+            pointX = e.clientX - startX;
+            pointY = e.clientY - startY;
+            updateTransform();
+        });
+
+        window.addEventListener('mouseup', () => {
+            panning = false;
+            pane.classList.remove('grabbing');
+        });
+
+        function rotate(deg) {
+            rotation += deg;
+            updateTransform();
+            document.getElementById('unsaved-badge').style.display = 'inline-block';
+        }
+
+        function updateTransform() {
+            container.style.transform = `translate(${pointX}px, ${pointY}px) rotate(${rotation}deg) scale(${scale})`;
+        }
+
+        function resetView() {
+            scale = 1; rotation = 0; pointX = 0; pointY = 0;
+            document.getElementById('unsaved-badge').style.display = 'none';
+            updateTransform();
+        }
+
+        // --- NAVIGATION CONTROLS ---
+        function changePage(offset) {
+            const s = document.getElementById('sel-page');
+            const newIdx = s.selectedIndex + offset;
+            if (newIdx >= 0 && newIdx < s.options.length) {
+                s.selectedIndex = newIdx;
+                loadContent();
+            }
+        }
+
+        function loadBooks() {
+            const colName = document.getElementById('sel-collection').value;
+            const bookSelect = document.getElementById('sel-book');
+            bookSelect.innerHTML = '';
+            
+            if (indexData[colName]) {
+                Object.keys(indexData[colName]).sort().forEach(book => {
+                    bookSelect.add(new Option(book, book));
+                });
+            }
+            loadPages();
+        }
+
+        function loadPages() {
+            const colName = document.getElementById('sel-collection').value;
+            const bookName = document.getElementById('sel-book').value;
+            const pageSelect = document.getElementById('sel-page');
+            pageSelect.innerHTML = '';
+
+            let maxPages = (indexData[colName] && indexData[colName][bookName]) ? indexData[colName][bookName] : 0;
+
+            for(let i=1; i<=maxPages; i++) {
+                let p = String(i).padStart(3, '0');
+                pageSelect.add(new Option("Page " + p, p));
+            }
+            loadContent();
+        }
+
+        function loadContent() {
+            const c = document.getElementById('sel-collection').value;
+            const b = document.getElementById('sel-book').value;
+            const p = document.getElementById('sel-page').value;
+            
+            const basePath = `processed_data/${c}/${b}`;
+            document.getElementById('scan-img').src = `${basePath}/images/page_${p}.jpg`;
+            document.getElementById('replica-frame').src = `${basePath}/htmls/page_${p}.html`;
+            
+            resetView();
+        }
+    </script>
+</body>
+</html>

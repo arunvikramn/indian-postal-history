@@ -1,0 +1,13 @@
+.gradle/ 
+build/ 
+__pycache__/ 
+.venv/ 
+*.log 
+poppler-25.12.0/ 
+poppler-25.12.0/ 
+IPG/ 
+IPM/ 
+processed_data/ 
+*.pdf 
+*.jpg 
+*.png 
